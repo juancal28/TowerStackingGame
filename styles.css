@@ -106,6 +106,32 @@ header h1 {
     opacity: 0.8;
 }
 
+.btn-info {
+    background: #17a2b8;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.btn-info:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+.btn-info:active:not(:disabled) {
+    opacity: 0.8;
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-info:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .target-section, .game-section {
     margin-bottom: 40px;
 }
@@ -150,6 +176,18 @@ header h1 {
 
 .tower.selected .tower-slot.filled:last-of-type {
     box-shadow: 0 0 10px rgba(102, 126, 234, 0.5), 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+
+.tower.animating-source {
+    outline: 3px solid #ffc107;
+    outline-offset: 5px;
+    border-radius: 10px;
+}
+
+.tower.animating-dest {
+    outline: 3px solid #28a745;
+    outline-offset: 5px;
+    border-radius: 10px;
 }
 
 .tower-base {

@@ -6,7 +6,10 @@ let gameState = {
     selectedTower: null,
     moveCount: 0,
     optimalMoves: 0,
-    isGameComplete: false
+    isGameComplete: false,
+    solutionPath: [], // Store the sequence of moves for the optimal solution
+    isAnimating: false, // Track if solution animation is playing
+    animationTimeout: null // Store animation timeout ID
 };
 
 // Color palette for blocks
@@ -23,6 +26,10 @@ const COLORS = [
 
 // Initialize game
 function initGame() {
+    // Stop any ongoing animation
+    if (gameState.isAnimating) {
+        stopAnimation();
+    }
     generateTargetConfiguration();
     generateStartingConfiguration();
     // Store initial configuration for reset
@@ -30,22 +37,43 @@ function initGame() {
     gameState.moveCount = 0;
     gameState.selectedTower = null;
     gameState.isGameComplete = false;
-    calculateOptimalMoves();
+    gameState.isAnimating = false;
+    gameState.solutionPath = []; // Clear previous solution
+    gameState.optimalMoves = 0;
+    
     renderGame();
     updateMoveCount();
     hideMessage();
+    updateButtons(); // Disable show answer button initially
+    
+    // Show loading message
+    showMessage('Calculating optimal solution...', 'info');
+    
+    // Calculate optimal moves (this may take a moment for complex puzzles)
+    // Run in setTimeout to allow UI to update first
+    setTimeout(() => {
+        calculateOptimalMoves();
+        // The calculateOptimalMoves function will update buttons when done
+        hideMessage();
+    }, 50);
 }
 
 // Reset current game to initial state
 function resetGame() {
+    // Stop any ongoing animation
+    if (gameState.isAnimating) {
+        stopAnimation();
+    }
     // Restore initial configuration
     gameState.currentTowers = gameState.initialTowers.map(tower => [...tower]);
     gameState.moveCount = 0;
     gameState.selectedTower = null;
     gameState.isGameComplete = false;
+    gameState.isAnimating = false;
     renderGame();
     updateMoveCount();
     hideMessage();
+    setTimeout(updateButtons, 100);
 }
 
 // Generate a random target configuration
@@ -155,64 +183,148 @@ function areConfigurationsEqual(config1, config2) {
     return true;
 }
 
-// Calculate optimal moves using BFS
+// Calculate optimal moves using BFS and store solution path
+// Since puzzles are always solvable (same blocks in start and target), 
+// we guarantee finding a solution with high enough limits
 function calculateOptimalMoves() {
     const start = JSON.stringify(gameState.currentTowers);
     const target = JSON.stringify(gameState.targetTowers);
     
     if (start === target) {
         gameState.optimalMoves = 0;
+        gameState.solutionPath = [];
+        if (typeof updateButtons === 'function') {
+            setTimeout(updateButtons, 0);
+        }
         return;
     }
     
-    const queue = [{ config: gameState.currentTowers, moves: 0 }];
+    const parentMap = new Map();
+    const queue = [{ 
+        config: gameState.currentTowers.map(t => [...t]), 
+        moves: 0,
+        configStr: start
+    }];
     const visited = new Set();
     visited.add(start);
+    parentMap.set(start, null);
     
-    // Limit search to prevent performance issues
-    const maxDepth = 20;
-    const maxIterations = 10000;
+    // Very high limits - puzzles with max 12 blocks should be solvable well within these limits
+    // For worst case, we might need up to ~30-40 moves, but set much higher to be safe
+    const maxDepth = 200; // Very high depth limit
+    const maxIterations = 5000000; // Very high iteration limit (5 million)
     let iterations = 0;
+    let foundSolution = false;
     
-    while (queue.length > 0 && iterations < maxIterations) {
+    while (queue.length > 0 && iterations < maxIterations && !foundSolution) {
         iterations++;
-        const { config, moves } = queue.shift();
+        const current = queue.shift();
         
-        if (moves > maxDepth) {
-            break;
+        // Skip if depth limit exceeded, but continue searching other paths
+        if (current.moves > maxDepth) {
+            continue;
         }
         
-        // Try all possible moves
+        // Try all possible moves from current state
         for (let from = 0; from < 3; from++) {
-            if (config[from].length === 0) continue;
+            if (current.config[from].length === 0) continue;
             
             for (let to = 0; to < 3; to++) {
                 if (from === to) continue;
-                if (config[to].length >= 5) continue;
+                if (current.config[to].length >= 5) continue;
                 
-                // Make move
-                const newConfig = config.map(tower => [...tower]);
+                // Make the move
+                const newConfig = current.config.map(tower => [...tower]);
                 const block = newConfig[from].pop();
                 newConfig[to].push(block);
                 
                 const configStr = JSON.stringify(newConfig);
                 
+                // Check if we found the target
                 if (configStr === target) {
-                    gameState.optimalMoves = moves + 1;
-                    return;
+                    // Store the move that reaches the target
+                    parentMap.set(configStr, {
+                        parentConfigStr: current.configStr,
+                        move: { from, to }
+                    });
+                    
+                    // Reconstruct the path backwards from target to start
+                    const path = [];
+                    let currentStr = configStr;
+                    
+                    while (true) {
+                        const parentInfo = parentMap.get(currentStr);
+                        if (!parentInfo || !parentInfo.move) break;
+                        path.unshift(parentInfo.move);
+                        currentStr = parentInfo.parentConfigStr;
+                    }
+                    
+                    gameState.optimalMoves = current.moves + 1;
+                    gameState.solutionPath = path;
+                    foundSolution = true;
+                    
+                    console.log(`Solution found: ${path.length} moves in ${iterations} iterations`);
+                    
+                    if (typeof updateButtons === 'function') {
+                        updateButtons();
+                    }
+                    return; // Success!
                 }
                 
+                // Add new state to queue if not visited
                 if (!visited.has(configStr)) {
                     visited.add(configStr);
-                    queue.push({ config: newConfig, moves: moves + 1 });
+                    parentMap.set(configStr, {
+                        parentConfigStr: current.configStr,
+                        move: { from, to }
+                    });
+                    queue.push({
+                        config: newConfig,
+                        moves: current.moves + 1,
+                        configStr: configStr
+                    });
                 }
             }
         }
     }
     
-    // If BFS didn't find a solution within limits, use heuristic
-    const totalBlocks = gameState.targetTowers.flat().length;
-    gameState.optimalMoves = Math.max(1, Math.floor(totalBlocks * 0.8));
+    // If we reach here, something went wrong - puzzle should always be solvable
+    // This could happen if:
+    // 1. Limits are still too low (unlikely with current settings)
+    // 2. There's a bug in puzzle generation
+    // 3. Memory/performance issues
+    console.error('ERROR: Could not find solution!', {
+        iterations,
+        queueLength: queue.length,
+        visitedSize: visited.size,
+        start,
+        target
+    });
+    
+    // As a last resort, verify the puzzle is actually solvable by checking block counts
+    const startBlocks = gameState.currentTowers.flat().sort().join(',');
+    const targetBlocks = gameState.targetTowers.flat().sort().join(',');
+    
+    if (startBlocks !== targetBlocks) {
+        console.error('CRITICAL: Puzzle is unsolvable - blocks do not match!', {
+            startBlocks,
+            targetBlocks
+        });
+        // Regenerate puzzle if blocks don't match
+        generateStartingConfiguration();
+        // Retry with new configuration
+        calculateOptimalMoves();
+        return;
+    }
+    
+    // Blocks match, so puzzle is solvable - this is a search algorithm issue
+    // Set empty solution path but log the error
+    gameState.optimalMoves = 0;
+    gameState.solutionPath = [];
+    
+    if (typeof updateButtons === 'function') {
+        setTimeout(updateButtons, 0);
+    }
 }
 
 // Render towers
@@ -292,7 +404,7 @@ function renderGame() {
 
 // Handle tower click
 function handleTowerClick(towerIndex) {
-    if (gameState.isGameComplete) return;
+    if (gameState.isGameComplete || gameState.isAnimating) return;
     
     if (gameState.selectedTower === null) {
         // Select source tower
@@ -396,6 +508,134 @@ function hideMessage() {
     messageEl.style.display = 'none';
 }
 
+// Show answer animation
+function showAnswer() {
+    if (gameState.isAnimating) {
+        return;
+    }
+    
+    if (gameState.solutionPath.length === 0) {
+        showMessage('Solution not available. Optimal moves may not have been calculated.', 'error');
+        return;
+    }
+    
+    // Reset to initial state before animating
+    gameState.currentTowers = gameState.initialTowers.map(tower => [...tower]);
+    gameState.moveCount = 0;
+    gameState.selectedTower = null;
+    gameState.isGameComplete = false;
+    gameState.isAnimating = true;
+    
+    updateButtons();
+    renderGame();
+    updateMoveCount();
+    hideMessage();
+    showMessage('Showing optimal solution...', 'info');
+    
+    // Animate each move
+    let moveIndex = 0;
+    const animateMove = () => {
+        if (!gameState.isAnimating || moveIndex >= gameState.solutionPath.length) {
+            // Animation complete
+            gameState.isAnimating = false;
+            updateButtons();
+            hideMessage();
+            if (checkWin()) {
+                showWinMessage();
+            }
+            return;
+        }
+        
+        const move = gameState.solutionPath[moveIndex];
+        
+        // Highlight the source and destination towers
+        setTimeout(() => {
+            const sourceTower = document.querySelectorAll('#game-towers .tower')[move.from];
+            const destTower = document.querySelectorAll('#game-towers .tower')[move.to];
+            
+            if (sourceTower) sourceTower.classList.add('animating-source');
+            if (destTower) destTower.classList.add('animating-dest');
+            
+            // Wait a bit, then make the move
+            gameState.animationTimeout = setTimeout(() => {
+                // Remove highlights
+                if (sourceTower) sourceTower.classList.remove('animating-source');
+                if (destTower) destTower.classList.remove('animating-dest');
+                
+                // Make the move
+                if (makeMove(move.from, move.to)) {
+                    gameState.moveCount++;
+                    renderGame();
+                    updateMoveCount();
+                }
+                
+                moveIndex++;
+                
+                // Continue with next move after a delay
+                if (moveIndex < gameState.solutionPath.length) {
+                    gameState.animationTimeout = setTimeout(animateMove, 600);
+                } else {
+                    // All moves complete
+                    gameState.isAnimating = false;
+                    updateButtons();
+                    hideMessage();
+                    if (checkWin()) {
+                        showWinMessage();
+                    }
+                }
+            }, 400);
+        }, 50);
+    };
+    
+    // Start animation after a short delay
+    gameState.animationTimeout = setTimeout(animateMove, 300);
+}
+
+// Stop animation
+function stopAnimation() {
+    if (gameState.animationTimeout) {
+        clearTimeout(gameState.animationTimeout);
+        gameState.animationTimeout = null;
+    }
+    gameState.isAnimating = false;
+    
+    // Remove animation classes
+    document.querySelectorAll('.animating-source, .animating-dest').forEach(el => {
+        el.classList.remove('animating-source', 'animating-dest');
+    });
+    
+    updateButtons();
+}
+
+// Update button states
+function updateButtons() {
+    const showAnswerBtn = document.getElementById('show-answer-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const newGameBtn = document.getElementById('new-game-btn');
+    
+    // Check if buttons exist (DOM might not be ready yet)
+    if (!showAnswerBtn || !resetBtn || !newGameBtn) {
+        return;
+    }
+    
+    if (gameState.isAnimating) {
+        showAnswerBtn.textContent = 'Animating...';
+        showAnswerBtn.disabled = true;
+        resetBtn.disabled = true;
+        newGameBtn.disabled = true;
+    } else {
+        if (gameState.solutionPath.length === 0) {
+            showAnswerBtn.textContent = 'Show Answer';
+            showAnswerBtn.disabled = true;
+        } else {
+            showAnswerBtn.textContent = 'Show Answer';
+            showAnswerBtn.disabled = false;
+        }
+        resetBtn.disabled = false;
+        newGameBtn.disabled = false;
+    }
+}
+
 // Event listeners
 document.getElementById('new-game-btn').addEventListener('click', () => {
     initGame();
@@ -403,6 +643,10 @@ document.getElementById('new-game-btn').addEventListener('click', () => {
 
 document.getElementById('reset-btn').addEventListener('click', () => {
     resetGame();
+});
+
+document.getElementById('show-answer-btn').addEventListener('click', () => {
+    showAnswer();
 });
 
 // Initialize game on load
